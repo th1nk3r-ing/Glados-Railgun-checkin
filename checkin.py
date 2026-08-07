@@ -1,7 +1,9 @@
+import random
+import time
+
 import requests
-import json
 import os
-import logging
+from datetime import date
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
@@ -40,7 +42,6 @@ class LogEmoji:
     SUCCESS = "✅"
     FAIL = "❌"
     REPEAT = "🔄"
-    PENDING = "⏳"
     CHECKIN = "🎫"
     STATUS = "📊"
     POINTS = "💰"
@@ -97,16 +98,35 @@ class Config:
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
+    ENV_EXCHANGE_INTERVAL = "GLADOS_EXCHANGE_INTERVAL"
     ENV_VERBOSE = "GLADOS_VERBOSE"
 
     """默认兑换计划"""
     DEFAULT_EXCHANGE_PLAN = "plan500"
 
+    """默认兑换间隔（天），非天天尝试兑换"""
+    DEFAULT_EXCHANGE_INTERVAL = 3
+
     """默认是否输出详细响应"""
     DEFAULT_VERBOSE = False
 
-    """默认域名"""
-    DOMAINS = ["glados.cloud", "railgun.info"]
+    """GLaDOS 域名（同一账号体系，作为故障转移链，优先第一个）"""
+    GLADOS_DOMAINS = [
+        "glados.cloud",
+        "glados.one",
+        "glados.rocks",
+        "glados.network",
+        "glados.space",
+    ]
+
+    """Railgun 域名（独立账号体系）"""
+    RAILGUN_DOMAINS = ["railgun.info"]
+
+    """多 Cookie 之间签到的最大随机间隔（秒）"""
+    COOKIE_SLEEP_MAX = 15
+
+    """全部域名"""
+    DOMAINS = GLADOS_DOMAINS + RAILGUN_DOMAINS
 
     """兑换计划列表"""
     EXCHANGE_PLANS = {
@@ -119,6 +139,8 @@ class Config:
         self.push_key: str = ""
         self.cookies_list: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
+        self.exchange_interval: int = self.DEFAULT_EXCHANGE_INTERVAL
+        self.exchange_due: bool = False
         self.verbose: bool = self.DEFAULT_VERBOSE
         self._load_config()
 
@@ -127,6 +149,7 @@ class Config:
         push_key_env: Optional[str] = os.environ.get(self.ENV_PUSH_KEY)
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
+        exchange_interval_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_INTERVAL)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
 
         if not push_key_env:
@@ -158,6 +181,19 @@ class Config:
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
 
+        if exchange_interval_env is not None:
+            try:
+                interval = int(exchange_interval_env)
+                if interval >= 1:
+                    self.exchange_interval = interval
+                    logger.info(f"{LogEmoji.SUCCESS} 使用指定的兑换间隔: {self.exchange_interval} 天")
+                else:
+                    logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_INTERVAL}' 必须 >= 1，将使用默认间隔 {self.DEFAULT_EXCHANGE_INTERVAL} 天。")
+            except ValueError:
+                logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_INTERVAL}' 的值 '{exchange_interval_env}' 无效，将使用默认间隔 {self.DEFAULT_EXCHANGE_INTERVAL} 天。")
+
+        logger.info(f"{LogEmoji.INFO} 当前兑换间隔: {self.exchange_interval} 天。")
+
         if verbose_env is not None:
             verbose_env_lower = verbose_env.lower()
             if verbose_env_lower in ["true", "1", "yes", "y"]:
@@ -168,6 +204,10 @@ class Config:
                 logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_VERBOSE}' 的值 '{verbose_env}' 无效，将使用默认值 {self.DEFAULT_VERBOSE}。")
 
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
+
+    def is_exchange_due(self) -> bool:
+        """判断今天是否轮到尝试兑换（每 N 天一次，基于日期序号取模）"""
+        return date.today().toordinal() % self.exchange_interval == 0
 
 
 class API:
@@ -185,10 +225,6 @@ class API:
         self.headers: Dict[str, str] = self._get_headers()
         self.session = requests.Session()
         self.session.headers.update(self.headers)
-
-    def __del__(self):
-        """关闭 session"""
-        self.close()
 
     def close(self) -> None:
         """关闭 session"""
@@ -304,8 +340,8 @@ class API:
         return result
 
     @log_method
-    def get_status(self, cookies: str) -> Tuple[str, int]:
-        """获取状态"""
+    def get_status(self, cookies: str, probe: bool = False) -> Tuple[str, int]:
+        """获取状态（probe=True 时用于 cookie 体系探测，输出中性日志）"""
 
         url = self._get_full_url(self.STATUS_URL)
         response = self._make_request(url, "GET", cookies=cookies)
@@ -320,7 +356,10 @@ class API:
                 self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, leftDays : {left_days_int} 天}}")
                 return f"{left_days_int} 天", code
             else:
-                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, leftDays : {left_days} 天}}", force=True)
+                if probe:
+                    self._log("info", LogEmoji.INFO, f"{{ code : {code}, leftDays : {left_days} 天}} (探测: 非本体系)", force=True)
+                else:
+                    self._log("info", LogEmoji.FAIL, f"{{ code : {code}, leftDays : {left_days} 天}}", force=True)
                 return "None 天", code
         else:
             self._log("warning", LogEmoji.WARNING, "获取状态失败", force=True)
@@ -425,32 +464,70 @@ class Checker:
         if self.config.verbose or force:
             logger.info(f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] {emoji} {message}")
 
-    def checkin_all(self):
-        """执行所有签到任务"""
-        cookie_count = len(self.config.cookies_list)
-        domain_count = len(self.config.DOMAINS)
-        total_tasks = cookie_count * domain_count
-        task_idx = 0
+    def _probe_cookie(self, cookie: str, cookie_idx: int) -> Tuple[bool, bool]:
+        """探测 cookie 属于哪个账号体系：GLaDOS 域名返回 code=0，Railgun 返回 No permission"""
+        is_glados, is_railgun = False, False
 
-        logger.info(f"{LogEmoji.INFO} 共 {cookie_count} 个 Cookie, {domain_count} 个域名, 共 {total_tasks} 个任务")
+        with API(self.config.GLADOS_DOMAINS[0], cookie_idx, verbose=self.config.verbose) as api:
+            _, code = api.get_status(cookie, probe=True)
+            is_glados = code == 0
+            self._log(cookie_idx, self.config.GLADOS_DOMAINS[0], LogEmoji.STATUS,
+                      f"探测 cookie 体系: GLaDOS -> {'命中' if is_glados else '未命中'}", force=True)
+
+        with API(self.config.RAILGUN_DOMAINS[0], cookie_idx, verbose=self.config.verbose) as api:
+            _, code = api.get_status(cookie, probe=True)
+            is_railgun = code == 0
+            self._log(cookie_idx, self.config.RAILGUN_DOMAINS[0], LogEmoji.STATUS,
+                      f"探测 cookie 体系: Railgun -> {'命中' if is_railgun else '未命中'}", force=True)
+
+        return is_glados, is_railgun
+
+    def checkin_all(self):
+        """执行所有签到任务（先探测 cookie 所属体系；GLaDOS 域名作为故障转移链）"""
+        cookie_count = len(self.config.cookies_list)
+        logger.info(
+            f"{LogEmoji.INFO} 共 {cookie_count} 个 Cookie, "
+            f"GLaDOS 域名 {len(self.config.GLADOS_DOMAINS)} 个, Railgun 域名 {len(self.config.RAILGUN_DOMAINS)} 个"
+        )
 
         for cookie_idx, cookie in enumerate(self.config.cookies_list, 1):
+            if cookie_idx > 1:
+                delay = random.uniform(0, self.config.COOKIE_SLEEP_MAX)
+                logger.info(f"{LogEmoji.INFO} 随机等待 {delay:.1f} 秒后处理下一个 Cookie...")
+                time.sleep(delay)
+
             logger.info(f"{LogEmoji.START} ========== 开始处理 Cookie {cookie_idx} ==========")
 
-            for domain in self.config.DOMAINS:
-                task_idx += 1
-                logger.info(f"{LogEmoji.INFO} ----- 任务 {task_idx}/{total_tasks}: {LogEmoji.COOKIE}[{cookie_idx}] on {LogEmoji.DOMAIN}[{domain}] -----")
+            is_glados, is_railgun = self._probe_cookie(cookie, cookie_idx)
+            if is_glados:
+                domains = self.config.GLADOS_DOMAINS
+                sys_name = "GLaDOS"
+            elif is_railgun:
+                domains = self.config.RAILGUN_DOMAINS
+                sys_name = "Railgun"
+            else:
+                domains = self.config.DOMAINS
+                sys_name = "未知(全部尝试)"
+            self._log(cookie_idx, "-", LogEmoji.INFO, f"该 Cookie 归属: {sys_name}", force=True)
 
+            # GLaDOS 域名作为故障转移链：签到成功/重复即停，避免多余的重复与失败噪音
+            result = None
+            for domain in domains:
+                self._log(cookie_idx, domain, LogEmoji.INFO, f"尝试签到于 {domain}", force=True)
                 result = self._checkin_on_domain(cookie, cookie_idx, domain)
-                self.results.append(result)
+                if result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT):
+                    self._log(cookie_idx, domain, LogEmoji.INFO, "该域名已受理签到，停止故障转移", force=True)
+                    break
 
-                result_message = f"结果: {result.status}"
+            if result is not None:
+                self.results.append(result)
+                result_message = f"结果: {result.status} @ {result.domain}"
                 if result.code == CheckinStatus.SUCCESS:
                     if self.config.verbose:
                         result_message = f"结果: {result.status}, 获得 {result.points} 积分, 剩余 {result.days}, 总 {result.points_total}, {result.exchange}"
-                    self._log(cookie_idx, domain, LogEmoji.SUCCESS, result_message, force=True)
+                    self._log(cookie_idx, result.domain, LogEmoji.SUCCESS, result_message, force=True)
                 else:
-                    self._log(cookie_idx, domain, LogEmoji.WARNING, result_message, force=True)
+                    self._log(cookie_idx, result.domain, LogEmoji.WARNING, result_message, force=True)
 
     def _checkin_on_domain(self, cookie: str, cookie_idx: int, domain: str) -> CheckinResult:
         result = CheckinResult(cookie_idx, domain)
@@ -466,21 +543,34 @@ class Checker:
             checkin_result = api.checkin(cookie)
             result.status = checkin_result["status"]
             result.code = checkin_result.get("code", CheckinStatus.FAILURE)
+            result.points = str(checkin_result.get("points", "0"))
 
             # 3. 获取积分
             self._log(cookie_idx, domain, LogEmoji.POINTS, "查询总积分")
-            points_str, points_num = api.get_points(cookie)
+            points_str, _ = api.get_points(cookie)
             result.points_total = points_str
 
-            # 4. 执行兑换
-            required_points = self.config.EXCHANGE_PLANS.get(self.config.exchange_plan, 500)
-            self._log(
-                cookie_idx,
-                domain,
-                LogEmoji.EXCHANGE,
-                f"开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)",
-            )
-            result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
+            # 4. 兑换（仅当签到被受理时执行，且每 N 天尝试一次，避免天天调用兑换接口）
+            if result.code not in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT):
+                result.exchange = "未兑换(签到失败)"
+            elif not self.config.exchange_due:
+                result.exchange = "未兑换(未到期)"
+                self._log(
+                    cookie_idx,
+                    domain,
+                    LogEmoji.EXCHANGE,
+                    f"跳过兑换 {self.config.exchange_plan}（今日非兑换日，间隔 {self.config.exchange_interval} 天）",
+                    force=True,
+                )
+            else:
+                required_points = self.config.EXCHANGE_PLANS.get(self.config.exchange_plan, 500)
+                self._log(
+                    cookie_idx,
+                    domain,
+                    LogEmoji.EXCHANGE,
+                    f"开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)",
+                )
+                result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
 
         return result
 
@@ -501,14 +591,9 @@ class Checker:
         send_content_lines = []
         log_content_lines = []
         for i, res in enumerate(results, 1):
-            line = f"#{i} P:{res['points']} 剩余:{res['days']} 总积分:{res['points_total']} | {res['status']} | {res['exchange']}"
+            line = f"#{i} 本次:{res['points']} 剩余:{res['days']} 总积分:{res['points_total']} | {res['status']} | {res['exchange']}"
             send_content_lines.append(line)
-
-            if self.config.verbose:
-                log_line = line
-            else:
-                log_line = f"#{i} {res['status']}"
-            log_content_lines.append(log_line)
+            log_content_lines.append(line)
 
         content = "\n".join(send_content_lines)
         log_content = "\n".join(log_content_lines)
@@ -521,10 +606,13 @@ logger = init_logger()
 
 def main():
     """主函数"""
+    config = None
     try:
         # 1. 加载配置
         logger.info(f"{LogEmoji.START} 步骤 1: 加载配置")
         config = Config()
+        config.exchange_due = config.is_exchange_due()
+        logger.info(f"{LogEmoji.INFO} 今日是否轮到兑换: {'是' if config.exchange_due else '否'}")
 
         if not config.cookies_list:
             logger.error(f"{LogEmoji.ERROR} 未找到有效的 Cookie, 退出程序。")
@@ -546,8 +634,11 @@ def main():
 
     # 4. 发送推送
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
-    push_service = PushService(config if "config" in locals() else "")
-    push_service.send(title, content)
+    if config is not None:
+        push_service = PushService(config)
+        push_service.send(title, content)
+    else:
+        logger.warning(f"{LogEmoji.WARNING} 配置加载失败，跳过推送。")
     logger.info(f"{LogEmoji.END} 签到完成")
 
 
