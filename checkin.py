@@ -366,8 +366,8 @@ class API:
             return "None 天", -2
 
     @log_method
-    def get_points(self, cookies: str) -> Tuple[str, int]:
-        """获取积分"""
+    def get_points(self, cookies: str) -> Tuple[str, int, str]:
+        """获取积分（含连续签到天数）"""
         url = self._get_full_url(self.POINTS_URL)
         response = self._make_request(url, "GET", cookies=cookies)
 
@@ -375,19 +375,21 @@ class API:
             data = response.json()
             code = data.get("code", -2)
             points = data.get("points", None)
+            streak = data.get("streak", None)
+            streak_str = str(streak) if streak is not None else "-"
 
             if points is not None:
                 points_int = int(float(points))
-                self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points_int} 积分}}")
+                self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points_int} 积分, streak : {streak_str} }}")
                 points_str = f"{points_int} 积分"
                 points_num = points_int
-                return points_str, points_num
+                return points_str, points_num, streak_str
             else:
                 self._log("info", LogEmoji.FAIL, f"{{ code : {code}, points : {points} 积分}}", force=True)
-                return "None 积分", 0
+                return "None 积分", 0, streak_str
         else:
             self._log("warning", LogEmoji.WARNING, "获取积分失败", force=True)
-            return "None 积分", 0
+            return "None 积分", 0, "-"
 
     @log_method
     def exchange(self, cookies: str, plan: str, required_points: int) -> str:
@@ -421,6 +423,7 @@ class CheckinResult:
     points: str = "0"
     days: str = "None"
     points_total: str = "None"
+    streak: str = "-"
     exchange: str = "未兑换"
     code: CheckinStatus = CheckinStatus.FAILURE  # 0: 成功, 1: 重复, -2: 失败
 
@@ -547,8 +550,9 @@ class Checker:
 
             # 3. 获取积分
             self._log(cookie_idx, domain, LogEmoji.POINTS, "查询总积分")
-            points_str, _ = api.get_points(cookie)
+            points_str, _, streak_str = api.get_points(cookie)
             result.points_total = points_str
+            result.streak = streak_str
 
             # 4. 兑换（仅当签到被受理时执行，且每 N 天尝试一次，避免天天调用兑换接口）
             if result.code not in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT):
@@ -580,7 +584,7 @@ class Checker:
 
     def format_results(self) -> Tuple[str, str, str]:
         """格式化结果"""
-        results = self.get_results()
+        results = sorted(self.get_results(), key=lambda r: r["cookie_index"])
 
         success_count = sum(1 for r in results if r["code"] == CheckinStatus.SUCCESS)
         repeat_count = sum(1 for r in results if r["code"] == CheckinStatus.REPEAT)
@@ -591,9 +595,12 @@ class Checker:
         send_content_lines = []
         log_content_lines = []
         for i, res in enumerate(results, 1):
-            line = f"#{i} 本次:{res['points']} 剩余:{res['days']} 总积分:{res['points_total']} | {res['status']} | {res['exchange']}"
-            send_content_lines.append(line)
-            log_content_lines.append(line)
+            line1 = f"#{i} 本次:{res['points']} 总积分:{res['points_total']} | {res['status']}"
+            line2 = f"    连续:{res['streak']} 剩余:{res['days']} | {res['exchange']}"
+            send_content_lines.append(line1)
+            send_content_lines.append(line2)
+            log_content_lines.append(f"{LogEmoji.COOKIE}[{res['cookie_index']}] {line1}")
+            log_content_lines.append(f"{LogEmoji.COOKIE}[{res['cookie_index']}] {line2}")
 
         content = "\n".join(send_content_lines)
         log_content = "\n".join(log_content_lines)
@@ -626,7 +633,11 @@ def main():
             # 3. 格式化结果
             logger.info(f"{LogEmoji.START} 步骤 3: 格式化结果")
             title, content, log_content = checker.format_results()
-            logger.info(f"\n{LogEmoji.END}========== 签到总结 ==========\n{title}\n{log_content}")
+            logger.info(f"{LogEmoji.END}========== 签到总结 ==========")
+            logger.info(f"{LogEmoji.INFO} {title}")
+            for _line in log_content.split("\n"):
+                if _line.strip():
+                    logger.info(f"{LogEmoji.INFO} {_line}")
 
     except Exception as e:
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
