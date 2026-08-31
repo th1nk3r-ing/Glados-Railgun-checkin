@@ -54,6 +54,10 @@ jobs:
         PUSHDEER_SENDKEY: ${{ secrets.PUSHDEER_SENDKEY }}
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
+        # 按账号配置兑换计划，& 分隔，与 GLADOS_COOKIES 中的 Cookie 顺序一一对应
+        # 可选值: plan100 / plan200 / plan500 / none(关闭该账号自动兑换)
+        # 未配置的账号回落到 GLADOS_EXCHANGE_PLAN (默认 plan500)
+        GLADOS_EXCHANGE_PLANS: 'plan500&none'
         GLADOS_EXCHANGE_INTERVAL: ${{ vars.GLADOS_EXCHANGE_INTERVAL || '3' }}
         GLADOS_VERBOSE: ${{ secrets.GLADOS_VERBOSE }}
 

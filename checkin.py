@@ -25,6 +25,7 @@ class ExchangePlan(Enum):
     PLAN100 = "plan100"
     PLAN200 = "plan200"
     PLAN500 = "plan500"
+    NONE = "none"
 
 
 class APIEndpoint(Enum):
@@ -98,6 +99,7 @@ class Config:
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
+    ENV_EXCHANGE_PLANS = "GLADOS_EXCHANGE_PLANS"
     ENV_EXCHANGE_INTERVAL = "GLADOS_EXCHANGE_INTERVAL"
     ENV_VERBOSE = "GLADOS_VERBOSE"
 
@@ -133,12 +135,14 @@ class Config:
         ExchangePlan.PLAN100.value: 100,
         ExchangePlan.PLAN200.value: 200,
         ExchangePlan.PLAN500.value: 500,
+        ExchangePlan.NONE.value: 0,
     }
 
     def __init__(self):
         self.push_key: str = ""
         self.cookies_list: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
+        self.exchange_plans: List[str] = []
         self.exchange_interval: int = self.DEFAULT_EXCHANGE_INTERVAL
         self.exchange_due: bool = False
         self.verbose: bool = self.DEFAULT_VERBOSE
@@ -149,6 +153,7 @@ class Config:
         push_key_env: Optional[str] = os.environ.get(self.ENV_PUSH_KEY)
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
+        exchange_plans_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLANS)
         exchange_interval_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_INTERVAL)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
 
@@ -177,6 +182,39 @@ class Config:
                 logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，将使用默认兑换计划 {self.DEFAULT_EXCHANGE_PLAN}。")
                 self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
 
+        # 按账号配置兑换计划：& 分隔，与 GLADOS_COOKIES 中的 Cookie 按顺序一一对应
+        if not exchange_plans_env:
+            logger.info(f"{LogEmoji.INFO} 环境变量 '{self.ENV_EXCHANGE_PLANS}' 未设置，所有账号使用统一兑换计划 {self.exchange_plan}。")
+        else:
+            raw_plans = exchange_plans_env.split("&")
+            self.exchange_plans = []
+            for idx, raw_plan in enumerate(raw_plans, 1):
+                plan = raw_plan.strip()
+                if plan in self.EXCHANGE_PLANS:
+                    self.exchange_plans.append(plan)
+                else:
+                    logger.warning(
+                        f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLANS}' 第 {idx} 个账号的值 '{raw_plan}' 无效，"
+                        f"该账号将使用全局兑换计划 {self.exchange_plan}。"
+                    )
+                    self.exchange_plans.append(self.exchange_plan)
+            if len(self.exchange_plans) > len(self.cookies_list):
+                logger.warning(
+                    f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLANS}' 的账号数 ({len(self.exchange_plans)}) "
+                    f"多于 Cookie 数 ({len(self.cookies_list)})，多余部分将被忽略。"
+                )
+            elif self.exchange_plans and len(self.exchange_plans) < len(self.cookies_list):
+                logger.warning(
+                    f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLANS}' 的账号数 ({len(self.exchange_plans)}) "
+                    f"少于 Cookie 数 ({len(self.cookies_list)})，缺失的账号将使用全局兑换计划 {self.exchange_plan}。"
+                )
+            if self.exchange_plans:
+                logger.info(
+                    f"{LogEmoji.INFO} 各账号兑换计划: "
+                    + ", ".join(f"#{i + 1}={p}" for i, p in enumerate(self.exchange_plans))
+                    + f"（其余账号使用 {self.exchange_plan}）"
+                )
+
         logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.cookies_list)} 个 Cookie 用于签到。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
@@ -204,6 +242,12 @@ class Config:
                 logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_VERBOSE}' 的值 '{verbose_env}' 无效，将使用默认值 {self.DEFAULT_VERBOSE}。")
 
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
+
+    def get_exchange_plan(self, cookie_idx: int) -> str:
+        """获取指定账号（1 起始）的兑换计划，未单独配置时回落全局计划"""
+        if 1 <= cookie_idx <= len(self.exchange_plans):
+            return self.exchange_plans[cookie_idx - 1]
+        return self.exchange_plan
 
     def is_exchange_due(self) -> bool:
         """判断今天是否轮到尝试兑换（每 N 天一次，基于日期序号取模）"""
@@ -555,26 +599,36 @@ class Checker:
             result.streak = streak_str
 
             # 4. 兑换（仅当签到被受理时执行，且每 N 天尝试一次，避免天天调用兑换接口）
+            exchange_plan = self.config.get_exchange_plan(cookie_idx)
             if result.code not in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT):
                 result.exchange = "未兑换(签到失败)"
+            elif exchange_plan == ExchangePlan.NONE.value:
+                result.exchange = "未兑换(已关闭)"
+                self._log(
+                    cookie_idx,
+                    domain,
+                    LogEmoji.EXCHANGE,
+                    "自动兑换已关闭 (none)，跳过兑换",
+                    force=True,
+                )
             elif not self.config.exchange_due:
                 result.exchange = "未兑换(未到期)"
                 self._log(
                     cookie_idx,
                     domain,
                     LogEmoji.EXCHANGE,
-                    f"跳过兑换 {self.config.exchange_plan}（今日非兑换日，间隔 {self.config.exchange_interval} 天）",
+                    f"跳过兑换 {exchange_plan}（今日非兑换日，间隔 {self.config.exchange_interval} 天）",
                     force=True,
                 )
             else:
-                required_points = self.config.EXCHANGE_PLANS.get(self.config.exchange_plan, 500)
+                required_points = self.config.EXCHANGE_PLANS.get(exchange_plan, 500)
                 self._log(
                     cookie_idx,
                     domain,
                     LogEmoji.EXCHANGE,
-                    f"开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)",
+                    f"开始兑换 {exchange_plan} (需要 {required_points} 积分)",
                 )
-                result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
+                result.exchange = api.exchange(cookie, exchange_plan, required_points)
 
         return result
 

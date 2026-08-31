@@ -41,8 +41,17 @@
 | `plan100` | 100 积分 | 10 天 |
 | `plan200` | 200 积分 | 30 天 |
 | `plan500` | 500 积分 | 100 天 (默认) |
+| `none` | - | 关闭自动兑换 |
 
 > 不配置时默认为 `plan500`，即积分达到 500 时自动兑换 100 天
+
+- 按账号单独配置兑换策略（非必须）：在 `.github/workflows/gladosCheck.yml` 的签到步骤 `env` 中配置 `GLADOS_EXCHANGE_PLANS`，多个账号使用 `&` 分隔，与 `GLADOS_COOKIES` 中的 Cookie 顺序一一对应：
+
+```yaml
+GLADOS_EXCHANGE_PLANS: 'plan500&none'
+```
+
+> 上例表示：第 1 个账号使用 `plan500`，第 2 个账号关闭自动兑换。未配置的账号（如 Cookie 数量多于计划数量时）回落到 `GLADOS_EXCHANGE_PLAN`（默认 `plan500`）
 
 4. 手机推送（非必须）
 
