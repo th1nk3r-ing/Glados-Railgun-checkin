@@ -26,7 +26,9 @@
 
 - 点击第一个选项卡后在`Request Headers`下找到`Cookie`，右键复制cookie的值即可
 
-  > 参考格式：koa:sess=eyJ1c2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxAwMH0=; koa:sess.sig=xJkOxxxxxxxxxxxxxxxtnM;
+  > 参考格式：`koa:sess=eyJ1c2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxAwMH0=; koa:sess.sig=xJkOxxxxxxxxxxxxxxxtnM; gld:sess=gld_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; gld:sess.sig=xxxxxxxxxxxxxxxxxxxxxxxxxxx`
+  >
+  > ⚠️ **必须包含 4 个 cookie**：`koa:sess`、`koa:sess.sig`、`gld:sess`、`gld:sess.sig`。只填 `koa:sess` + `koa:sess.sig` 会返回 `{"code":-2,"message":"没有权限"}`（GLaDOS 现已新增 `gld:sess` 校验）。
 
 ![图片加载失败](imgs/3.png)
 
@@ -75,6 +77,7 @@ GLADOS_EXCHANGE_PLANS: 'plan500&none'
 
 - **2026-01**: 重构代码，添加log输出方便定位，支持新版网址，支持配置积分兑换策略。
 - **2026-04**: 优化代码逻辑，优化日志输出，支持[新版域名](https://railgun.info) ，在 GLADOS_COOKIES 中添加新版域名下的 cookies 即可使用。
+- **2026-09**: 适配 GLaDOS 新增的 `gld:sess` cookie（缺失会导致 `没有权限`）；全部账号签到失败时脚本以非零状态退出，使 Actions 正确显示失败。
 
 
 ## 问题排查与定位

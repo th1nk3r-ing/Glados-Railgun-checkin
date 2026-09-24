@@ -1,4 +1,5 @@
 import random
+import sys
 import time
 
 import requests
@@ -9,6 +10,15 @@ from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 from pypushdeer import PushDeer
 from logging_config import init_logger
+
+
+# 对齐真实浏览器的 User-Agent（GLaDOS 现按请求特征做反自动化/设备绑定校验）
+# 默认 macOS Chrome，可用环境变量 GLADOS_USER_AGENT 覆盖为登录该账号时浏览器的 UA
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+)
+USER_AGENT = os.environ.get("GLADOS_USER_AGENT", DEFAULT_USER_AGENT)
 
 
 class CheckinStatus(Enum):
@@ -288,10 +298,19 @@ class API:
         return False
 
     def _get_headers(self) -> Dict[str, str]:
-        """获取请求头"""
+        """获取请求头（对齐真实浏览器同源 XHR 的请求特征）"""
         return {
             "origin": f"https://{self.domain}",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36",
+            "referer": f"https://{self.domain}/console/checkin",
+            "user-agent": USER_AGENT,
+            "accept": "application/json, text/plain, */*",
+            "accept-language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "sec-ch-ua": '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
         }
 
     def _log(self, level: str, emoji: str, message: str, force: bool = False) -> None:
@@ -668,6 +687,7 @@ logger = init_logger()
 def main():
     """主函数"""
     config = None
+    exit_code = 0
     try:
         # 1. 加载配置
         logger.info(f"{LogEmoji.START} 步骤 1: 加载配置")
@@ -678,6 +698,7 @@ def main():
         if not config.cookies_list:
             logger.error(f"{LogEmoji.ERROR} 未找到有效的 Cookie, 退出程序。")
             title, content = "# 未找到 cookies!", ""
+            exit_code = 1
         else:
             # 2. 执行签到
             logger.info(f"{LogEmoji.START} 步骤 2: 执行签到")
@@ -693,9 +714,22 @@ def main():
                 if _line.strip():
                     logger.info(f"{LogEmoji.INFO} {_line}")
 
+            # 全部 Cookie 均签到失败时以非零状态退出，让 CI 失败，避免"绿色但实际失效"
+            accepted_count = sum(
+                1 for result in checker.get_results()
+                if result["code"] in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT)
+            )
+            if accepted_count == 0:
+                logger.error(
+                    f"{LogEmoji.ERROR} 全部 {len(config.cookies_list)} 个 Cookie 签到均失败，"
+                    f"请检查 Cookie 是否已失效。"
+                )
+                exit_code = 1
+
     except Exception as e:
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
         title, content, log_content = "# 脚本执行出错", str(e), str(e)
+        exit_code = 1
 
     # 4. 发送推送
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
@@ -705,6 +739,9 @@ def main():
     else:
         logger.warning(f"{LogEmoji.WARNING} 配置加载失败，跳过推送。")
     logger.info(f"{LogEmoji.END} 签到完成")
+
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
