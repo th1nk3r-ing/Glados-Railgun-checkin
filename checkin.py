@@ -9,6 +9,8 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 from pypushdeer import PushDeer
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from logging_config import init_logger
 
 
@@ -19,6 +21,32 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
 )
 USER_AGENT = os.environ.get("GLADOS_USER_AGENT", DEFAULT_USER_AGENT)
+
+# 各平台合法 User-Agent（版本号无关，仅平台 token 关键）
+# 用于设备平台自适应：服务端返回 loginDevice 时切换到对应平台 UA 重试
+PLATFORM_UA = {
+    "Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "macOS": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Linux": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "iPhone": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Android": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+}
+
+# sec-ch-ua-platform / sec-ch-ua-mobile 需与 UA 平台保持一致，避免指纹自相矛盾
+PLATFORM_CH_UA_PLATFORM = {
+    "Windows": '"Windows"',
+    "macOS": '"macOS"',
+    "Linux": '"Linux"',
+    "iPhone": '"iOS"',
+    "Android": '"Android"',
+}
+PLATFORM_CH_UA_MOBILE = {
+    "Windows": "?0",
+    "macOS": "?0",
+    "Linux": "?0",
+    "iPhone": "?1",
+    "Android": "?1",
+}
 
 
 class CheckinStatus(Enum):
@@ -277,8 +305,20 @@ class API:
         self.cookie_index: int = cookie_index
         self.verbose: bool = verbose
         self.headers: Dict[str, str] = self._get_headers()
+        self._device_platform_cache: Dict[str, str] = {}
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        # 网络抖动时自动重试（指数退避），降低 CI 误报失败
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET", "POST"),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def close(self) -> None:
         """关闭 session"""
@@ -330,9 +370,13 @@ class API:
         """获取完整 URL"""
         return f"https://{self.domain}{path}"
 
-    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "") -> Optional[requests.Response]:
-        """发送 HTTP 请求"""
+    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "", platform: Optional[str] = None) -> Optional[requests.Response]:
+        """发送 HTTP 请求（platform 非空时按该平台覆盖 UA 及 sec-ch-ua 平台头）"""
         session_headers = self.headers.copy()
+        if platform in PLATFORM_UA:
+            session_headers["user-agent"] = PLATFORM_UA[platform]
+            session_headers["sec-ch-ua-platform"] = PLATFORM_CH_UA_PLATFORM.get(platform, session_headers.get("sec-ch-ua-platform", '"macOS"'))
+            session_headers["sec-ch-ua-mobile"] = PLATFORM_CH_UA_MOBILE.get(platform, session_headers.get("sec-ch-ua-mobile", "?0"))
         session_headers["cookie"] = cookies
 
         try:
@@ -358,47 +402,76 @@ class API:
 
     @log_method
     def checkin(self, cookies: str) -> Dict[str, Union[str, CheckinStatus]]:
-        """执行签到"""
+        """执行签到，含设备平台自适应重试"""
         url = self._get_full_url(self.CHECKIN_URL)
         checkin_data = self._get_checkin_data()
-        response = self._make_request(url, "POST", checkin_data, cookies)
 
-        result = {
+        # 起始平台：优先复用本次运行已学得的设备平台，否则用会话默认 UA（macOS）
+        platform = self._device_platform_cache.get("_last")
+        raw = self._checkin_attempt(url, checkin_data, cookies, platform)
+
+        # 设备不匹配(code 4 / device-mismatch)时按服务端 loginDevice 切换平台 UA 重试一次
+        if raw is not None and raw.get("code") == 4 and raw.get("reason") == "device-mismatch":
+            login_device = raw.get("loginDevice")
+            if login_device in PLATFORM_UA:
+                self._device_platform_cache[login_device] = login_device
+                if login_device != platform:
+                    self._log("warning", LogEmoji.WARNING, f"设备平台不匹配 (loginDevice={login_device})，切换 UA 重试", force=True)
+                    raw = self._checkin_attempt(url, checkin_data, cookies, login_device)
+                    platform = login_device
+
+        if raw is not None and raw.get("code") in (CheckinStatus.SUCCESS.value, CheckinStatus.REPEAT.value) and platform in PLATFORM_UA:
+            self._device_platform_cache["_last"] = platform
+
+        return self._parse_checkin(raw)
+
+    def _checkin_attempt(self, url: str, data: Dict, cookies: str, platform: Optional[str]) -> Optional[Dict]:
+        """发起一次签到请求并返回解析后的响应体（失败返回 None）"""
+        response = self._make_request(url, "POST", data, cookies, platform=platform)
+        if not response:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            self._log("error", LogEmoji.ERROR, "签到响应解析失败", force=True)
+            return None
+
+    def _parse_checkin(self, raw: Optional[Dict]) -> Dict[str, Union[str, CheckinStatus]]:
+        """解析签到响应为结果字典"""
+        result: Dict[str, Union[str, CheckinStatus]] = {
             "status": "签到失败",
             "points": "0",
             "message": "",
             "code": CheckinStatus.FAILURE,
         }
 
-        if response:
-            data = response.json()
-            code = data.get("code", -2)
-            message = data.get("message", "无消息字段")
-            points = str(data.get("points", 0))
-
-            if code == CheckinStatus.SUCCESS.value:
-                self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points}, message : {message} }}")
-                result["code"] = CheckinStatus.SUCCESS
-                result["status"] = "签到成功"
-                result["points"] = points
-                result["message"] = message
-            elif code == CheckinStatus.REPEAT.value:
-                self._log("info", LogEmoji.REPEAT, f"{{ code : {code}, message : {message} }}", force=True)
-                result["code"] = CheckinStatus.REPEAT
-                result["status"] = "重复签到"
-                result["points"] = "0"
-                result["message"] = message
-            else:
-                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
-                result["code"] = CheckinStatus.FAILURE
-                result["status"] = "签到失败"
-                result["points"] = "0"
-                result["message"] = message
-        else:
+        if not raw:
             self._log("warning", LogEmoji.WARNING, "签到失败", force=True)
+            result["message"] = "网络请求失败"
+            return result
+
+        code = raw.get("code", -2)
+        message = raw.get("message", "无消息字段")
+        points = str(raw.get("points", 0))
+
+        if code == CheckinStatus.SUCCESS.value:
+            self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points}, message : {message} }}")
+            result["code"] = CheckinStatus.SUCCESS
+            result["status"] = "签到成功"
+            result["points"] = points
+            result["message"] = message
+        elif code == CheckinStatus.REPEAT.value:
+            self._log("info", LogEmoji.REPEAT, f"{{ code : {code}, message : {message} }}", force=True)
+            result["code"] = CheckinStatus.REPEAT
+            result["status"] = "重复签到"
+            result["points"] = "0"
+            result["message"] = message
+        else:
+            self._log("info", LogEmoji.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
             result["code"] = CheckinStatus.FAILURE
             result["status"] = "签到失败"
-            result["message"] = "网络请求失败"
+            result["points"] = "0"
+            result["message"] = message
 
         return result
 
