@@ -57,7 +57,10 @@ GLADOS_EXCHANGE_PLANS: 'plan500&none'
 
 4. 手机推送（非必须）
 
-- 添加1个`repository secret`，命名为`PUSHDEER_SENDKEY`，其值对应 PushDeer key: ([获取地址](https://www.pushdeer.com/product.html))。
+支持多个推送后端，按需配置对应 `repository secret` 即可，**配置几个就发几个（都发）**：
+
+- **PushDeer**：添加 `repository secret` 命名为 `PUSHDEER_SENDKEY`，其值对应 PushDeer key（[获取地址](https://www.pushdeer.com/product.html)）。
+- **Server酱**：添加 `repository secret` 命名为 `SERVERCHAN_SENDKEY`，其值对应 Server酱 SendKey（[获取地址](https://sct.ftqq.com/)）。
 
 ### **star**自己的仓库
 
@@ -66,11 +69,13 @@ GLADOS_EXCHANGE_PLANS: 'plan500&none'
 ## 文件结构
 
 ```shell
-│  checkin.py	# 签到脚本
+│  checkin.py          # 签到主脚本
+│  logging_config.py   # 日志配置（北京时间、[I/W/E] 短标签）
+│  requirements.txt    # Python 依赖
 │
 ├─.github
 │  └─workflows
-│          gladosCheck.yml	# Actions 配置文件
+│          gladosCheck.yml   # Actions 配置文件
 ```
 
 ## 更新日志
@@ -80,6 +85,7 @@ GLADOS_EXCHANGE_PLANS: 'plan500&none'
 - **2026-09**: 适配 GLaDOS 新增的 `gld:sess` cookie（缺失会导致 `没有权限`）；全部账号签到失败时脚本以非零状态退出，使 Actions 正确显示失败。
 - **2026-09**: 新增设备平台自适应重试：签到返回 `code 4` 时自动读取服务端 `loginDevice` 并切换对应平台 UA 重试，无需手动配置 User-Agent。
 - **2026-09**: 新增网络层重试/退避：`requests.Session` 挂载 `HTTPAdapter` + `urllib3.Retry`（total=3、指数退避 1/2/4s、对 429/5xx 自动重试），降低 CI 网络抖动导致的误报失败；业务 200 响应不受影响。
+- **2026-10**: 推送支持 Server酱（多后端「都发」策略）；日志级别短标签 `[I]/[W]/[E]` 对齐；新增 `requirements.txt`。
 
 
 ## 问题排查与定位

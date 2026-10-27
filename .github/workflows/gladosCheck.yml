@@ -45,8 +45,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests
-        pip install pypushdeer
+        pip install -r requirements.txt
 
     # 执行 签到脚本
     - name: Running checkin
@@ -54,6 +53,7 @@ jobs:
         python checkin.py
       env:
         PUSHDEER_SENDKEY: ${{ secrets.PUSHDEER_SENDKEY }}
+        SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
         # 按账号配置兑换计划，& 分隔，与 GLADOS_COOKIES 中的 Cookie 顺序一一对应
