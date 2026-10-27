@@ -26,13 +26,17 @@
 
 - 点击第一个选项卡后在`Request Headers`下找到`Cookie`，右键复制cookie的值即可
 
-  > 参考格式：`koa:sess=eyJ1c2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxAwMH0=; koa:sess.sig=xJkOxxxxxxxxxxxxxxxtnM; gld:sess=gld_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; gld:sess.sig=xxxxxxxxxxxxxxxxxxxxxxxxxxx`
+  > 参考格式（最小可用）：`gld:sess=gld_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; gld:sess.sig=xxxxxxxxxxxxxxxxxxxxxxxxxxx`
   >
-  > ⚠️ **必须包含 4 个 cookie**：`koa:sess`、`koa:sess.sig`、`gld:sess`、`gld:sess.sig`。只填 `koa:sess` + `koa:sess.sig` 会返回 `{"code":-2,"message":"没有权限"}`（GLaDOS 现已新增 `gld:sess` 校验）。
+  > ✅ **只需 `gld:sess` + `gld:sess.sig` 两个 cookie**，实测在 `glados.cloud` / `glados.space` / `glados.network` 均可通过校验。
+  >
+  > `koa:sess` / `koa:sess.sig` 是旧版会话，已失效、可省略；只带这两个会返回 `{"code":-2,"message":"没有权限"}`。
+
+- Safari：先在「设置 → 高级」勾选「显示网页开发者功能」，在 GLaDOS 页面按 `Option+Command+I` 打开 Web Inspector，切到 `Network` 刷新，找到 `/api/user/status` 请求，在请求头里复制 `Cookie` 的值。
 
 ![图片加载失败](imgs/3.png)
 
-- 多账号请在 `COOKIES` 中 添加多个 `cookies` 中间使用 `&`连接即可。（例如： `c1&c3&c3...`）
+- 多账号请在 `COOKIES` 中 添加多个 `cookies` 中间使用 `&`连接即可。（例如： `c1&c2&c3`）
 
 3. 配置积分兑换策略（非必须）
 
@@ -86,6 +90,7 @@ GLADOS_EXCHANGE_PLANS: 'plan500&none'
 - **2026-09**: 新增设备平台自适应重试：签到返回 `code 4` 时自动读取服务端 `loginDevice` 并切换对应平台 UA 重试，无需手动配置 User-Agent。
 - **2026-09**: 新增网络层重试/退避：`requests.Session` 挂载 `HTTPAdapter` + `urllib3.Retry`（total=3、指数退避 1/2/4s、对 429/5xx 自动重试），降低 CI 网络抖动导致的误报失败；业务 200 响应不受影响。
 - **2026-10**: 推送支持 Server酱（多后端「都发」策略）；日志级别短标签 `[I]/[W]/[E]` 对齐；新增 `requirements.txt`。
+- **2026-10**: Cookie 精简为 `gld:sess` + `gld:sess.sig`（`koa:sess` 已废弃，无需再配置）。
 
 
 ## 问题排查与定位
