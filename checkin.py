@@ -1,3 +1,4 @@
+import hashlib
 import random
 import sys
 import time
@@ -48,6 +49,10 @@ PLATFORM_CH_UA_MOBILE = {
     "Android": "?1",
 }
 
+# 签到 challenge：站方要求先取 nonce，至少等待 2.5 秒后再提交 proof（SHA-256 证明）
+CHALLENGE_SUFFIX = "glados-observe-v1"
+CHALLENGE_DELAY_SECONDS = 2.5
+
 
 class CheckinStatus(Enum):
     """签到状态"""
@@ -70,6 +75,7 @@ class APIEndpoint(Enum):
     """API端点"""
 
     CHECKIN = "/api/user/checkin"
+    CHECKIN_CHALLENGE = "/api/user/checkin/challenge"
     STATUS = "/api/user/status"
     POINTS = "/api/user/points"
     EXCHANGE = "/api/user/exchange"
@@ -305,6 +311,7 @@ class API:
     """API 调用"""
 
     CHECKIN_URL = APIEndpoint.CHECKIN.value
+    CHECKIN_CHALLENGE_URL = APIEndpoint.CHECKIN_CHALLENGE.value
     STATUS_URL = APIEndpoint.STATUS.value
     POINTS_URL = APIEndpoint.POINTS.value
     EXCHANGE_URL = APIEndpoint.EXCHANGE.value
@@ -380,8 +387,8 @@ class API:
         """获取完整 URL"""
         return f"https://{self.domain}{path}"
 
-    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "", platform: Optional[str] = None) -> Optional[requests.Response]:
-        """发送 HTTP 请求（platform 非空时按该平台覆盖 UA 及 sec-ch-ua 平台头）"""
+    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "", platform: Optional[str] = None, json_body: bool = False) -> Optional[requests.Response]:
+        """发送 HTTP 请求（platform 非空时按该平台覆盖 UA 及 sec-ch-ua 平台头；json_body 为真时按 JSON 提交）"""
         session_headers = self.headers.copy()
         if platform in PLATFORM_UA:
             session_headers["user-agent"] = PLATFORM_UA[platform]
@@ -391,7 +398,10 @@ class API:
 
         try:
             if method.upper() == "POST":
-                response = self.session.post(url, headers=session_headers, data=data, timeout=(60, 120))
+                if json_body:
+                    response = self.session.post(url, headers=session_headers, json=data, timeout=(60, 120))
+                else:
+                    response = self.session.post(url, headers=session_headers, data=data, timeout=(60, 120))
             elif method.upper() == "GET":
                 response = self.session.get(url, headers=session_headers, timeout=(60, 120))
             else:
@@ -435,9 +445,39 @@ class API:
 
         return self._parse_checkin(raw)
 
+    def _checkin_challenge(self, cookies: str, platform: Optional[str]) -> Optional[Tuple[str, str]]:
+        """获取签到 challenge 并计算 proof；失败返回 None，由调用方回退旧协议"""
+        url = self._get_full_url(self.CHECKIN_CHALLENGE_URL)
+        response = self._make_request(url, "GET", cookies=cookies, platform=platform)
+        if not response:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            self._log("warning", LogEmoji.WARNING, "签到 challenge 响应解析失败，按旧协议提交", force=True)
+            return None
+        if not isinstance(data, dict) or data.get("code") != 0 or not data.get("nonce"):
+            self._log("warning", LogEmoji.WARNING, f"签到 challenge 响应异常: {data}", force=True)
+            return None
+
+        # 站方要求 challenge 到手后至少等待 2.5 秒再提交
+        time.sleep(CHALLENGE_DELAY_SECONDS)
+        nonce = str(data["nonce"])
+        proof = hashlib.sha256(f"{nonce}.{CHALLENGE_SUFFIX}".encode()).hexdigest()
+        self._log("info", LogEmoji.CHECKIN, "已获取签到 challenge")
+        return nonce, proof
+
     def _checkin_attempt(self, url: str, data: Dict, cookies: str, platform: Optional[str]) -> Optional[Dict]:
         """发起一次签到请求并返回解析后的响应体（失败返回 None）"""
-        response = self._make_request(url, "POST", data, cookies, platform=platform)
+        payload = dict(data)
+        challenge = self._checkin_challenge(cookies, platform)
+        if challenge:
+            nonce, proof = challenge
+            payload.update({"nonce": nonce, "proof": proof})
+        else:
+            self._log("warning", LogEmoji.WARNING, "未取得签到 challenge，按旧协议提交（可能只获得 1 积分）", force=True)
+
+        response = self._make_request(url, "POST", payload, cookies, platform=platform, json_body=bool(challenge))
         if not response:
             return None
         try:
